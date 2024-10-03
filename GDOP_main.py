@@ -28,12 +28,12 @@ import pandas as pd
 import urllib.request
 import json
 import os
-from common import EPHEMERIS_FOLDER, ARCGIS_DATA_FOLDER, SKYLINE_GRAPHS_FOLDER, DOP_OUTPUT_CSV
+from common import EPHEMERIS_FOLDER, ARCGIS_DATA_FOLDER, SKYLINE_GRAPHS_FOLDER, DOP_RESULTS_FOLDER
 from pathlib import Path
 
 # Select GNSS constellations
 USE_GPS     = True
-USE_GALILEO = True
+USE_GALILEO = False
 USE_GLONASS = False
 USE_BEIDOU  = False
 
@@ -145,15 +145,18 @@ def polar2cart(r, theta, phi):
     ]
 
 
-def calc_dop(sat_rel_pos_list):
-        if len(sat_rel_pos_list) < 4:
+def calc_dop(gnss_sats_rel_pos):
+        gnss_const_count = len(gnss_sats_rel_pos)
+        satelite_count_in_first_gnss = len(list(gnss_sats_rel_pos.values())[0])
+        if gnss_const_count > 1 and satelite_count_in_first_gnss < 4:
+            # Need wgdop func
             return None
 
         mat: np.array = []
         # d(0) - satellite x-pos
         # psd - distance from observer to sat
         # Calc vis sats is list of sat names
-        for pos in sat_rel_pos_list:
+        for pos in list(gnss_sats_rel_pos.values())[0]:
             psd = pos[3]
             row = [-pos[0] / psd, -pos[1] / psd, -pos[2] / psd, 1]
             mat.append(row)
@@ -167,6 +170,9 @@ def calc_dop(sat_rel_pos_list):
         TDOP = Q[3][3]
         return GDOP, HDOP, VDOP, TDOP
 
+
+def calc_wdop():
+    return None
 
 
 def load_skylines(obs_point_count):
@@ -229,12 +235,13 @@ def calc_DOP_trough_time(observer, skyline, gnss_ephem, times):
     idx = 0
     ts = load.timescale()
     for time in times:
+        gnss_sats_rel_pos = dict()
         for gnss in gnss_ephem.keys():
             const_ephem = gnss_ephem[gnss]
             sat_objects = {sat: EarthSatellite(const_ephem[sat][0], const_ephem[sat][1], sat, ts) for sat in const_ephem}
             t = ts.utc(time.year, time.month, time.day, time.hour, time.minute, time.second)
             # Initialize satellite objects
-            visible_sats_rel_pos = []
+            gnss_sats_rel_pos[gnss] = []
             for sat in sat_objects:
                 difference = sat_objects[sat] - observer
                 topocentric = difference.at(t)
@@ -246,14 +253,14 @@ def calc_DOP_trough_time(observer, skyline, gnss_ephem, times):
                 sat_is_visible = is_visible(r, circle_sector)
                 if sat_is_visible:
                     x,y,z = polar2cart(distance.m, theta, r)
-                    visible_sats_rel_pos.append((x,y,z,distance.m))
+                    gnss_sats_rel_pos[gnss].append((x,y,z,distance.m))
                     #print(sat, r, theta, zenith1, zenith2, angle_lower, angle_upper)
                 plot_sat(sat_is_visible, ax, gnss, theta, r, idx, sat)
         idx += 1
         #print('FIX', observer_pos, visible_sats)
-        GDOP, HDOP, VDOP, TDOP = calc_dop(visible_sats_rel_pos)
-        last_idx = len(GDOP_df.index)
-        GDOP_df.loc[last_idx] = [GDOP, HDOP, VDOP, TDOP] 
+        GDOP, HDOP, VDOP, TDOP = calc_dop(gnss_sats_rel_pos)
+        append_at_last_idx = len(GDOP_dfs[time].index)
+        GDOP_dfs[time].loc[append_at_last_idx] = [GDOP, HDOP, VDOP, TDOP] 
         print(t, GDOP)
     plt.show()
 
@@ -263,17 +270,24 @@ if __name__ == '__main__':
     angle2zenith_dicts = load_skylines(obs_point_count)
     gnss_ephem = load_GNSS_data(USE_GPS, USE_GALILEO, USE_GLONASS, USE_BEIDOU)
     times = generate_time_interval(TIME_START, TIME_STOP, TIME_STEP)
-    global GDOP_df
-    GDOP_df = pd.DataFrame(columns=['GDOP','HDOP','VDOP','TDOP'])
+    global GDOP_dfs
+    GDOP_dfs = dict()
+    for time in times:
+        GDOP_dfs[time] = pd.DataFrame(columns=['GDOP','HDOP','VDOP','TDOP'])
     
     for i in range(obs_point_count): # iterate trough observation points
         obs_pt = obs_points_dict[i]
         skyline = angle2zenith_dicts[i]
         if skyline is None:
-            last_idx = len(GDOP_df.index)
-            GDOP_df.loc[last_idx] = [None, None, None, None]
+            for key in GDOP_dfs:
+                append_at_last_idx = len(GDOP_dfs[key].index)
+                GDOP_dfs[key].loc[append_at_last_idx] = [None, None, None, None]
             continue
         observer = Topos(latitude_degrees=obs_pt['LAT'], longitude_degrees=obs_pt['LONG'], elevation_m=obs_pt['ALT'])
         calc_DOP_trough_time(observer, skyline, gnss_ephem, times)
     
-    GDOP_df.to_csv(DOP_OUTPUT_CSV)
+    for time in times:
+        time_str = time.strftime('%Y.%m.%d-%H.%M')
+        filename = 'DOP'+time_str+'.csv'
+        location = Path(DOP_RESULTS_FOLDER / filename)
+        GDOP_dfs[time].to_csv(location)
