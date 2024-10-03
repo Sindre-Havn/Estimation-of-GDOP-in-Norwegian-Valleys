@@ -28,7 +28,7 @@ import pandas as pd
 import urllib.request
 import json
 import os
-from common import EPHEMERIS_FOLDER, ARCGIS_DATA_FOLDER, SKYLINE_GRAPHS_FOLDER
+from common import EPHEMERIS_FOLDER, ARCGIS_DATA_FOLDER, SKYLINE_GRAPHS_FOLDER, DOP_OUTPUT_CSV
 from pathlib import Path
 
 # Select GNSS constellations
@@ -47,10 +47,6 @@ TIME_DURATION = timedelta(
 TIME_STOP = TIME_START + TIME_DURATION
 TIME_STEP = timedelta( hours=0, minutes=5, seconds=0 )
 
-
-def merge(dict1, dict2):
-    dict1.update(dict2)
-
 def load_sat_const_ephem(gnss) -> dict:
     """Takes in a gnss name and load the corresponding ephemeris .json file."""
     folder = os.listdir(EPHEMERIS_FOLDER)
@@ -68,16 +64,16 @@ def load_GNSS_data(USE_GPS, USE_GALILEO, USE_GLONASS, USE_BEIDOU):
     sat_const_ephem = dict()
     if USE_GPS:
         gps_ephem = load_sat_const_ephem('gps')
-        merge(sat_const_ephem, gps_ephem)
+        sat_const_ephem['gps'] = gps_ephem
     if USE_GALILEO:
         galileo_ephem = load_sat_const_ephem('galileo')
-        merge(sat_const_ephem, galileo_ephem)
+        sat_const_ephem['galileo'] = galileo_ephem
     if USE_GLONASS:
         glonass_ephem = load_sat_const_ephem('glonass')
-        merge(sat_const_ephem, glonass_ephem)
+        sat_const_ephem['glonass'] = glonass_ephem
     if USE_BEIDOU:
         beidou_ephem = load_sat_const_ephem('beidou')
-        merge(sat_const_ephem, beidou_ephem)
+        sat_const_ephem['beidou'] = beidou_ephem
     return sat_const_ephem
 
 def generate_time_interval(start, end, step):
@@ -85,7 +81,6 @@ def generate_time_interval(start, end, step):
     return sample_times
 
 def configure_plot(ax):
-    FILENAME = 'skyplot'
     FONTSIZE = 8
     ax.set_theta_zero_location('N')
     ax.set_theta_direction(-1)
@@ -120,7 +115,9 @@ def area(x1, y1, x2, y2, x3, y3):
                 + x3 * (y1 - y2)) / 2.0)
 
 def is_inside_triangle_sector(x1, y1, x2, y2, x3, y3, x, y):
-    """Return True if point (x,y) is inside the triangle 
+    """Used to approximate the zentih angle between two bearing angles,
+    example between 203-204 degree, with 360x1 degree resolution.
+    Return True if point (x,y) is inside the triangle 
     of the points (x1, y1), (x2, y2), (x3, y3)."""
     # Calculate area of triangle ABC
     A = area (x1, y1, x2, y2, x3, y3)
@@ -133,7 +130,6 @@ def is_inside_triangle_sector(x1, y1, x2, y2, x3, y3, x, y):
     # Check if sum of A1, A2 and A3 
     # is same as A
     diff = A - (A1 + A2 + A3)
-    #print('DIFF:',diff)
     # Due to rounding error, check if the areas
     # is close enough to equal.
     if(round(diff, 10) == 0):
@@ -149,7 +145,7 @@ def polar2cart(r, theta, phi):
     ]
 
 
-def get_single_gdop(sat_rel_pos_list):
+def calc_dop(sat_rel_pos_list):
         if len(sat_rel_pos_list) < 4:
             return None
 
@@ -165,16 +161,20 @@ def get_single_gdop(sat_rel_pos_list):
         m = np.matmul(np.transpose(mat), mat)
         Q = np.linalg.inv(m)
         T = np.trace(Q)
-        print('HDOP:', np.sqrt(Q[0][0]**2 + Q[1][1]**2), 'VDOP:', Q[2][2], 'TDOP:', Q[3][3])
-        G = np.sqrt(T)
-        return G
+        GDOP = np.sqrt(T)
+        HDOP = np.sqrt(Q[0][0]**2 + Q[1][1]**2)
+        VDOP = Q[2][2]
+        TDOP = Q[3][3]
+        return GDOP, HDOP, VDOP, TDOP
 
-def load_skylines(skyline_count):
+
+
+def load_skylines(obs_point_count):
     angle2zenith_dicts = []
-    for i in range(1,skyline_count+1):
-        try:
+    for i in range(obs_point_count):
+        try: # Because of unknown reason, about 50% of computed skylines return faulty zero-length polyline.
             location = Path(SKYLINE_GRAPHS_FOLDER / f"angles_table{i}.csv")
-            angles_table_df = pd.read_csv(location, sep=';', decimal=",") # ../
+            angles_table_df = pd.read_csv(location, sep=';', decimal=",")
             angles_table_df['HOR_AN_GEO'] = angles_table_df['HOR_AN_GEO'].apply(np.round).apply(int)
             skyline_dict = angles_table_df.set_index('HOR_AN_GEO')['ZENITH_ANG'].to_dict()
             angle2zenith_dicts.append(skyline_dict)
@@ -184,7 +184,7 @@ def load_skylines(skyline_count):
 
 def load_obs_points():
     location = Path(ARCGIS_DATA_FOLDER / 'observation_points.csv')
-    point_df = pd.read_csv(location, sep=';', decimal=",") # ../
+    point_df = pd.read_csv(location, sep=';', decimal=",")
     print(point_df)
     # Note 'POINT_X', 'POINT_Y', 'POINT_Z' should actually be long, lat, alt
     observation_points = point_df[['LONG', 'LAT', 'ALT']].to_dict('index')
@@ -205,7 +205,13 @@ def is_visible(r, circle_sector):
                            sat_vec[0], sat_vec[1])
     return inside
 
-def plot_sat(sat_is_visible, ax, name, theta, r, idx):
+def plot_sat(sat_is_visible, ax, gnss, theta, r, idx, sat):
+    letter_prefix = {'gps'   :'G',
+                    'galileo':'E',
+                    'glonass':'R',
+                    'beidou' :'B'}
+    identifier = sat[-4:-1].split(' ')[-1]
+    name = letter_prefix[gnss]+identifier if idx == 0 else ''
     FONTSIZE = 8
     if sat_is_visible:
         ax.plot(theta, r, 'o', c=(0.5+0.5/len(times)*idx, 0.0, 0.0, 0.5))
@@ -214,56 +220,60 @@ def plot_sat(sat_is_visible, ax, name, theta, r, idx):
         ax.plot(theta, r, 'o', c=(0.1, 0.1, 0.1, 0.5))
         ax.text(theta, r, name, fontsize=FONTSIZE, ha='right', va='bottom')
 
-def calc_DOP_trough_time(observer, skyline, sat_ephem, times):
+def calc_DOP_trough_time(observer, skyline, gnss_ephem, times):
     fig, ax = plt.subplots(subplot_kw={'projection': 'polar'},
                            figsize=(6, 6))
     ax = configure_plot(ax)
     skyline_circle_angle = np.deg2rad(list(skyline.keys()))
     plt.fill_between(skyline_circle_angle, 0, skyline.values(), alpha=0.2)
-    
     idx = 0
     ts = load.timescale()
-    sat_objects = {sat: EarthSatellite(sat_ephem[sat][0], sat_ephem[sat][1], sat, ts) for sat in sat_ephem}
     for time in times:
-        # Load timescale and observer position
-        t = ts.utc(time.year, time.month, time.day, time.hour, time.minute, time.second)
-        # Initialize satellite objects
-        visible_sats_rel_pos = []
-        for sat in sat_objects:
-            difference = sat_objects[sat] - observer
-            topocentric = difference.at(t)
-            alt, az, distance = topocentric.altaz()
-
-            theta = np.radians(az.degrees)
-            name = f'{sat}' if idx in (0, len(times)) else ''
-            r = 90 - alt.degrees
-            circle_sector = az.degrees
-            sat_is_visible = is_visible(r, circle_sector)
-            if sat_is_visible:
-                x,y,z = polar2cart(distance.m, theta, r)
-                visible_sats_rel_pos.append((x,y,z,distance.m))
-                #print(sat, r, theta, zenith1, zenith2, angle_lower, angle_upper)
-            plot_sat(sat_is_visible, ax, name, theta, r, idx)
-        #print('FIX', observer_pos, visible_sats)
-        GDOP = get_single_gdop(visible_sats_rel_pos)
-        print(t, GDOP)
+        for gnss in gnss_ephem.keys():
+            const_ephem = gnss_ephem[gnss]
+            sat_objects = {sat: EarthSatellite(const_ephem[sat][0], const_ephem[sat][1], sat, ts) for sat in const_ephem}
+            t = ts.utc(time.year, time.month, time.day, time.hour, time.minute, time.second)
+            # Initialize satellite objects
+            visible_sats_rel_pos = []
+            for sat in sat_objects:
+                difference = sat_objects[sat] - observer
+                topocentric = difference.at(t)
+                alt, az, distance = topocentric.altaz()
+    
+                theta = np.radians(az.degrees)
+                r = 90 - alt.degrees
+                circle_sector = az.degrees
+                sat_is_visible = is_visible(r, circle_sector)
+                if sat_is_visible:
+                    x,y,z = polar2cart(distance.m, theta, r)
+                    visible_sats_rel_pos.append((x,y,z,distance.m))
+                    #print(sat, r, theta, zenith1, zenith2, angle_lower, angle_upper)
+                plot_sat(sat_is_visible, ax, gnss, theta, r, idx, sat)
         idx += 1
+        #print('FIX', observer_pos, visible_sats)
+        GDOP, HDOP, VDOP, TDOP = calc_dop(visible_sats_rel_pos)
+        last_idx = len(GDOP_df.index)
+        GDOP_df.loc[last_idx] = [GDOP, HDOP, VDOP, TDOP] 
+        print(t, GDOP)
     plt.show()
 
 
 if __name__ == '__main__':
     obs_points_dict, obs_point_count = load_obs_points()
     angle2zenith_dicts = load_skylines(obs_point_count)
-    sat_ephem = load_GNSS_data(USE_GPS, USE_GALILEO, USE_GLONASS, USE_BEIDOU)
+    gnss_ephem = load_GNSS_data(USE_GPS, USE_GALILEO, USE_GLONASS, USE_BEIDOU)
     times = generate_time_interval(TIME_START, TIME_STOP, TIME_STEP)
-    global GDOP_list
-    GDOP_list = []
+    global GDOP_df
+    GDOP_df = pd.DataFrame(columns=['GDOP','HDOP','VDOP','TDOP'])
     
-    for i in range(obs_point_count):
+    for i in range(obs_point_count): # iterate trough observation points
         obs_pt = obs_points_dict[i]
         skyline = angle2zenith_dicts[i]
         if skyline is None:
-            GDOP_list.append(None)
+            last_idx = len(GDOP_df.index)
+            GDOP_df.loc[last_idx] = [None, None, None, None]
             continue
         observer = Topos(latitude_degrees=obs_pt['LAT'], longitude_degrees=obs_pt['LONG'], elevation_m=obs_pt['ALT'])
-        calc_DOP_trough_time(observer, skyline, sat_ephem, times)
+        calc_DOP_trough_time(observer, skyline, gnss_ephem, times)
+    
+    GDOP_df.to_csv(DOP_OUTPUT_CSV)

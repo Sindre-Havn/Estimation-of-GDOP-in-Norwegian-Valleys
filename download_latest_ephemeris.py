@@ -34,7 +34,7 @@ def main():
         gnss_ephem = get_sat_const_ephem(GNSS_URLS[gnss])
         new_filename = f'{gnss}_{current_time}.json'
         if new_filename in old_files_in_folder:
-            print('The ephemeris data has already been renewed this minute.')
+            print('The ephemeris data has already been re-newed this minute.')
             return
         with open(new_filename, 'w') as file:
             file.write(
