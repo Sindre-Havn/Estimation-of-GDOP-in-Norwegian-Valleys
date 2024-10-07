@@ -25,7 +25,6 @@ import numpy as np
 from matplotlib import pyplot as plt
 from datetime import datetime, timedelta
 import pandas as pd
-import urllib.request
 import json
 import os
 from common import EPHEMERIS_FOLDER, ARCGIS_DATA_FOLDER, SKYLINE_GRAPHS_FOLDER, DOP_RESULTS_FOLDER
@@ -36,6 +35,8 @@ USE_GPS     = True
 USE_GALILEO = False
 USE_GLONASS = False
 USE_BEIDOU  = False
+
+PLOT_SAT = True
 
 # Select time-stamps for calculating GDOP
 TIME_START = datetime.now()
@@ -61,7 +62,7 @@ def load_sat_const_ephem(gnss) -> dict:
 def load_GNSS_data(USE_GPS, USE_GALILEO, USE_GLONASS, USE_BEIDOU):
     if not(USE_GPS or USE_GALILEO or USE_GLONASS or USE_BEIDOU): # If all USE_cases are False
         raise ValueError('The function have to take in atleast one GNSS constellation, zero constellations given.')
-    sat_const_ephem = dict()
+    sat_const_ephem = dict() # Jeg synes det er veldig gøy at han ved siden av hører på en kjemi 101 spilleliste med breaking bad sanger
     if USE_GPS:
         gps_ephem = load_sat_const_ephem('gps')
         sat_const_ephem['gps'] = gps_ephem
@@ -114,7 +115,7 @@ def area(x1, y1, x2, y2, x3, y3):
     return abs((x1 * (y2 - y3) + x2 * (y3 - y1) 
                 + x3 * (y1 - y2)) / 2.0)
 
-def is_inside_triangle_sector(x1, y1, x2, y2, x3, y3, x, y):
+def is_inside_triangle(x1, y1, x2, y2, x3, y3, x, y):
     """Used to approximate the zentih angle between two bearing angles,
     example between 203-204 degree, with 360x1 degree resolution.
     Return True if point (x,y) is inside the triangle 
@@ -146,11 +147,12 @@ def polar2cart(r, theta, phi):
 
 
 def calc_dop(gnss_sats_rel_pos):
-        gnss_const_count = len(gnss_sats_rel_pos)
+        if len(gnss_sats_rel_pos) > 1:
+            GDOP, HDOP, VDOP, TDOP = calc_wdop(gnss_sats_rel_pos)
+            return GDOP, HDOP, VDOP, TDOP
         satelite_count_in_first_gnss = len(list(gnss_sats_rel_pos.values())[0])
-        if gnss_const_count > 1 and satelite_count_in_first_gnss < 4:
-            # Need wgdop func
-            return None
+        if satelite_count_in_first_gnss < 4:
+            return None, None, None, None
 
         mat: np.array = []
         # d(0) - satellite x-pos
@@ -158,6 +160,7 @@ def calc_dop(gnss_sats_rel_pos):
         # Calc vis sats is list of sat names
         for pos in list(gnss_sats_rel_pos.values())[0]:
             psd = pos[3]
+            # Row is normalized vector, with absolute length equal 1.
             row = [-pos[0] / psd, -pos[1] / psd, -pos[2] / psd, 1]
             mat.append(row)
 
@@ -171,14 +174,19 @@ def calc_dop(gnss_sats_rel_pos):
         return GDOP, HDOP, VDOP, TDOP
 
 
-def calc_wdop():
+def calc_wdop(gnss_sats_rel_pos):
+    """
+    H_N = np
+    for gnss in gnss_sats_rel_pos[gnss]:
+        H_N = 
+    """
     return None
 
 
 def load_skylines(obs_point_count):
     angle2zenith_dicts = []
     for i in range(obs_point_count):
-        try: # Because of unknown reason, about 50% of computed skylines return faulty zero-length polyline.
+        try: # Bug in arcgis code fails to generate ~50% of skylines. Failed skyline is not written to files.
             location = Path(SKYLINE_GRAPHS_FOLDER / f"angles_table{i}.csv")
             angles_table_df = pd.read_csv(location, sep=';', decimal=",")
             angles_table_df['HOR_AN_GEO'] = angles_table_df['HOR_AN_GEO'].apply(np.round).apply(int)
@@ -205,7 +213,7 @@ def is_visible(r, circle_sector):
     sect_vec_lower = geo_polar_to_cartesian(angle_lower, zenith1)
     sect_vec_upper = geo_polar_to_cartesian(angle_upper, zenith2)
     sat_vec = geo_polar_to_cartesian(circle_sector, r)
-    inside = is_inside_triangle_sector(0, 0,
+    inside = is_inside_triangle(0, 0,
                            sect_vec_lower[0], sect_vec_lower[1],
                            sect_vec_upper[0], sect_vec_upper[1],
                            sat_vec[0], sat_vec[1])
@@ -255,7 +263,7 @@ def calc_DOP_trough_time(observer, skyline, gnss_ephem, times):
                     x,y,z = polar2cart(distance.m, theta, r)
                     gnss_sats_rel_pos[gnss].append((x,y,z,distance.m))
                     #print(sat, r, theta, zenith1, zenith2, angle_lower, angle_upper)
-                plot_sat(sat_is_visible, ax, gnss, theta, r, idx, sat)
+                if PLOT_SAT: plot_sat(sat_is_visible, ax, gnss, theta, r, idx, sat)
         idx += 1
         #print('FIX', observer_pos, visible_sats)
         GDOP, HDOP, VDOP, TDOP = calc_dop(gnss_sats_rel_pos)
@@ -264,8 +272,18 @@ def calc_DOP_trough_time(observer, skyline, gnss_ephem, times):
         print(t, GDOP)
     plt.show()
 
+def append_None_to_DOP_rows():
+    for key in GDOP_dfs:
+        append_at_last_idx = len(GDOP_dfs[key].index)
+        GDOP_dfs[key].loc[append_at_last_idx] = [None, None, None, None]
 
 if __name__ == '__main__':
+    old_results = os.listdir(DOP_RESULTS_FOLDER)
+    if len(old_results) > 0:
+        input('There are old files in results folder that will be DELETED,\npress enter to proceed anyway')
+        for file in old_results:
+            os.remove(file)
+
     obs_points_dict, obs_point_count = load_obs_points()
     angle2zenith_dicts = load_skylines(obs_point_count)
     gnss_ephem = load_GNSS_data(USE_GPS, USE_GALILEO, USE_GLONASS, USE_BEIDOU)
@@ -278,16 +296,14 @@ if __name__ == '__main__':
     for i in range(obs_point_count): # iterate trough observation points
         obs_pt = obs_points_dict[i]
         skyline = angle2zenith_dicts[i]
-        if skyline is None:
-            for key in GDOP_dfs:
-                append_at_last_idx = len(GDOP_dfs[key].index)
-                GDOP_dfs[key].loc[append_at_last_idx] = [None, None, None, None]
+        if skyline is None: # Bug in arcgis code fails to generate ~50% of skylines.
+            append_None_to_DOP_rows()
             continue
         observer = Topos(latitude_degrees=obs_pt['LAT'], longitude_degrees=obs_pt['LONG'], elevation_m=obs_pt['ALT'])
         calc_DOP_trough_time(observer, skyline, gnss_ephem, times)
     
     for time in times:
         time_str = time.strftime('%Y.%m.%d-%H.%M')
-        filename = 'DOP'+time_str+'.csv'
+        filename = 'DOP_'+time_str+'.csv'
         location = Path(DOP_RESULTS_FOLDER / filename)
         GDOP_dfs[time].to_csv(location)
