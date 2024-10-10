@@ -29,6 +29,7 @@ import json
 import os
 from common import EPHEMERIS_FOLDER, ARCGIS_DATA_FOLDER, SKYLINE_GRAPHS_FOLDER, DOP_RESULTS_FOLDER
 from pathlib import Path
+import pytz
 
 # Select GNSS constellations
 USE_GPS     = True
@@ -39,14 +40,16 @@ USE_BEIDOU  = False
 PLOT_SAT = True
 
 # Select time-stamps for calculating GDOP
-TIME_START = datetime.now()
+UTC_DIFFERENCE = timedelta(hours=2) # Since Norway is UTC+2. This should be improved to solve for winter/summer time.
+TIME_START = datetime.now() - UTC_DIFFERENCE # Normalize to UTC time
+# TIME_START = datetime(year=2024, month=10, day=10, hour=11) # Set custom time
 TIME_DURATION = timedelta(
                       days=0,
-                      hours=1,
+                      hours=2,
                       minutes=0,
                       seconds=0 )
-TIME_STOP = TIME_START + TIME_DURATION
-TIME_STEP = timedelta( hours=0, minutes=5, seconds=0 )
+TIME_STOP = TIME_START + TIME_DURATION 
+TIME_STEP = timedelta( hours=0, minutes=5, seconds=0)
 
 def load_sat_const_ephem(gnss) -> dict:
     """Takes in a gnss name and load the corresponding ephemeris .json file."""
@@ -79,6 +82,7 @@ def load_GNSS_data(USE_GPS, USE_GALILEO, USE_GLONASS, USE_BEIDOU):
 
 def generate_time_interval(start, end, step):
     sample_times = pd.date_range(start, end, freq=step)
+    print(sample_times)
     return sample_times
 
 def configure_plot(ax):
@@ -148,11 +152,11 @@ def polar2cart(r, theta, phi):
 
 def calc_dop(gnss_sats_rel_pos):
         if len(gnss_sats_rel_pos) > 1:
-            GDOP, HDOP, VDOP, TDOP = calc_wdop(gnss_sats_rel_pos)
-            return GDOP, HDOP, VDOP, TDOP
+            EDOP, NDOP, HDOP, VDOP, TDOP, GDOP = calc_wdop(gnss_sats_rel_pos)
+            return EDOP, NDOP, HDOP, VDOP, TDOP, GDOP
         satelite_count_in_first_gnss = len(list(gnss_sats_rel_pos.values())[0])
         if satelite_count_in_first_gnss < 4:
-            return None, None, None, None
+            return None, None, None, None, None, None
 
         mat: np.array = []
         # d(0) - satellite x-pos
@@ -167,11 +171,13 @@ def calc_dop(gnss_sats_rel_pos):
         m = np.matmul(np.transpose(mat), mat)
         Q = np.linalg.inv(m)
         T = np.trace(Q)
-        GDOP = np.sqrt(T)
-        HDOP = np.sqrt(Q[0][0]**2 + Q[1][1]**2)
-        VDOP = Q[2][2]
-        TDOP = Q[3][3]
-        return GDOP, HDOP, VDOP, TDOP
+        EDOP = np.sqrt(Q[0][0]) # East DOP
+        NDOP = np.sqrt(Q[1][1]) # North DOP
+        HDOP = np.sqrt(EDOP**2 + NDOP**2) # Horizontal DOP
+        VDOP = Q[2][2]                    # Vertical DOP
+        TDOP = Q[3][3]                    # Time DOP
+        GDOP = np.sqrt(HDOP**2 + VDOP**2 + TDOP**2) # Geometric DOP
+        return EDOP, NDOP, HDOP, VDOP, TDOP, GDOP
 
 
 def calc_wdop(gnss_sats_rel_pos):
@@ -228,7 +234,7 @@ def plot_sat(sat_is_visible, ax, gnss, theta, r, idx, sat):
     name = letter_prefix[gnss]+identifier if idx == 0 else ''
     FONTSIZE = 8
     if sat_is_visible:
-        ax.plot(theta, r, 'o', c=(0.5+0.5/len(times)*idx, 0.0, 0.0, 0.5))
+        ax.plot(theta, r, 'o', c=(0.2+0.8/len(times)*idx, 0.0, 0.0, 0.5))
         ax.text(theta, r, name, fontsize=FONTSIZE, ha='right', va='bottom')
     else:
         ax.plot(theta, r, 'o', c=(0.1, 0.1, 0.1, 0.5))
@@ -265,24 +271,24 @@ def calc_DOP_trough_time(observer, skyline, gnss_ephem, times):
                     #print(sat, r, theta, zenith1, zenith2, angle_lower, angle_upper)
                 if PLOT_SAT: plot_sat(sat_is_visible, ax, gnss, theta, r, idx, sat)
         idx += 1
-        #print('FIX', observer_pos, visible_sats)
-        GDOP, HDOP, VDOP, TDOP = calc_dop(gnss_sats_rel_pos)
+        EDOP, NDOP, HDOP, VDOP, TDOP, GDOP = calc_dop(gnss_sats_rel_pos)
         append_at_last_idx = len(GDOP_dfs[time].index)
-        GDOP_dfs[time].loc[append_at_last_idx] = [GDOP, HDOP, VDOP, TDOP] 
+        GDOP_dfs[time].loc[append_at_last_idx] = [EDOP, NDOP, HDOP, VDOP, TDOP, GDOP] 
         print(t, GDOP)
     plt.show()
 
 def append_None_to_DOP_rows():
     for key in GDOP_dfs:
         append_at_last_idx = len(GDOP_dfs[key].index)
-        GDOP_dfs[key].loc[append_at_last_idx] = [None, None, None, None]
+        GDOP_dfs[key].loc[append_at_last_idx] = [None, None, None, None, None, None]
 
 if __name__ == '__main__':
     old_results = os.listdir(DOP_RESULTS_FOLDER)
     if len(old_results) > 0:
-        input('There are old files in results folder that will be DELETED,\npress enter to proceed anyway')
+        input('There are old files in results folder that will be DELETED,\npress [enter] to proceed anyway.\n>:')
         for file in old_results:
-            os.remove(file)
+            location = Path(DOP_RESULTS_FOLDER / file)
+            os.remove(location)
 
     obs_points_dict, obs_point_count = load_obs_points()
     angle2zenith_dicts = load_skylines(obs_point_count)
@@ -291,7 +297,7 @@ if __name__ == '__main__':
     global GDOP_dfs
     GDOP_dfs = dict()
     for time in times:
-        GDOP_dfs[time] = pd.DataFrame(columns=['GDOP','HDOP','VDOP','TDOP'])
+        GDOP_dfs[time] = pd.DataFrame(columns=['EDOP', 'NDOP', 'HDOP', 'VDOP', 'TDOP', 'GDOP'])
     
     for i in range(obs_point_count): # iterate trough observation points
         obs_pt = obs_points_dict[i]
