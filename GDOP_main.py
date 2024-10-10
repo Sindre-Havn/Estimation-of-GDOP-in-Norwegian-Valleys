@@ -19,7 +19,7 @@ Nice to know:
   'math' angle (cunterclockwise, 0 degree at east).
 
 """
-from skyfield.api import Topos, load, wgs84
+from skyfield.api import Topos, load
 from skyfield.sgp4lib import EarthSatellite
 import numpy as np
 from matplotlib import pyplot as plt
@@ -29,7 +29,6 @@ import json
 import os
 from common import EPHEMERIS_FOLDER, ARCGIS_DATA_FOLDER, SKYLINE_GRAPHS_FOLDER, DOP_RESULTS_FOLDER
 from pathlib import Path
-import pytz
 
 # Select GNSS constellations
 USE_GPS     = True
@@ -37,8 +36,9 @@ USE_GALILEO = True
 USE_GLONASS = False
 USE_BEIDOU  = False
 
+# Program options
 PLOT_SAT = True
-USE_WDOP = True # Not finished
+USE_WDOP = True
 UERE = {'gps':1.9, 'galileo':1.8, 'glonass':2.8, 'beidou':1.7}
 
 # Select time-stamps for calculating GDOP
@@ -58,7 +58,6 @@ def load_sat_const_ephem(gnss) -> dict:
     folder = os.listdir(EPHEMERIS_FOLDER)
     for filename in folder:
         if filename[:len(gnss)] == gnss:
-            print(filename)
             location = Path(EPHEMERIS_FOLDER / filename)
             with open(location, 'r') as file:
                     data = json.load(file)
@@ -84,7 +83,6 @@ def load_GNSS_data(USE_GPS, USE_GALILEO, USE_GLONASS, USE_BEIDOU):
 
 def generate_time_interval(start, end, step):
     sample_times = pd.date_range(start, end, freq=step)
-    print(sample_times)
     return sample_times
 
 def configure_plot(ax):
@@ -161,18 +159,17 @@ def calc_dop(gnss_sats_rel_pos):
         for const_sats in gnss_sats_rel_pos.values():
             for pos in list(const_sats):
                 all_sats.append(pos)
-        H: np.array = []
+        H = []
         # psd - distance from observer to sat
         # Calc vis sats is list of sat names
         for pos in all_sats:
             psd = pos[3]
-            # Row is normalized vector, with absolute length equal 1.
-            row = [-pos[0] / psd, -pos[1] / psd, -pos[2] / psd, 1]
+            row = [-pos[0] / psd, -pos[1] / psd, -pos[2] / psd, 1] # Normalized direction vector from observer to satellite.
             H.append(row)
         H = np.array(H)
         m = H.T @ H
         Q = np.linalg.inv(m)
-        T = np.trace(Q)
+        # T = np.trace(Q) Not Used
         EDOP = np.sqrt(Q[0][0]) # East DOP
         NDOP = np.sqrt(Q[1][1]) # North DOP
         HDOP = np.sqrt(EDOP**2 + NDOP**2) # Horizontal DOP
@@ -191,23 +188,21 @@ def calc_wdop(gnss_sats_rel_pos):
     for const_sats in gnss_sats_rel_pos.values():
         for pos in list(const_sats):
             all_sats.append(pos)
-    H: np.array = []
+    H = []
     # psd - distance from observer to sat
     # Calc vis sats is list of sat names
     for pos in all_sats:
         psd = pos[3]
-        # Row is normalized vector, with absolute length equal 1.
-        row = [-pos[0] / psd, -pos[1] / psd, -pos[2] / psd, 1]
+        row = [-pos[0] / psd, -pos[1] / psd, -pos[2] / psd, 1] # Normalized direction vector from observer to satellite.
         H.append(row)
     H = np.array(H)
     # Create weights matrix W
-    gnss_count = gnss_sats_rel_pos.keys()
     sat_UERE_vec = []
     W_side_length = 0
     for gnss in gnss_sats_rel_pos.keys():
         sat_count = len(gnss_sats_rel_pos[gnss])
         W_side_length += sat_count
-        for sat in range(sat_count):
+        for _ in range(sat_count):
             sat_UERE_vec.append(1/ UERE[gnss]**2)
     W = np.zeros((W_side_length,W_side_length))
     for i in range(len(sat_UERE_vec)):
@@ -241,8 +236,6 @@ def load_skylines(obs_point_count):
 def load_obs_points():
     location = Path(ARCGIS_DATA_FOLDER / 'observation_points.csv')
     point_df = pd.read_csv(location, sep=';', decimal=",")
-    print(point_df)
-    # Note 'POINT_X', 'POINT_Y', 'POINT_Z' should actually be long, lat, alt
     observation_points = point_df[['LONG', 'LAT', 'ALT']].to_dict('index')
     obs_point_count = len(point_df.index)
     return observation_points, obs_point_count
@@ -304,7 +297,6 @@ def calc_DOP_trough_time(observer, skyline, gnss_ephem, times):
                 if sat_is_visible:
                     x,y,z = polar2cart(distance.m, theta, r)
                     gnss_sats_rel_pos[gnss].append((x,y,z,distance.m))
-                    #print(sat, r, theta, zenith1, zenith2, angle_lower, angle_upper)
                 if PLOT_SAT: plot_sat(sat_is_visible, ax, gnss, theta, r, idx, sat)
         idx += 1
         if USE_WDOP:
