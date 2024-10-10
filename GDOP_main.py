@@ -33,12 +33,13 @@ import pytz
 
 # Select GNSS constellations
 USE_GPS     = True
-USE_GALILEO = False
+USE_GALILEO = True
 USE_GLONASS = False
 USE_BEIDOU  = False
 
 PLOT_SAT = True
-USE_WDOP = False # Not finished
+USE_WDOP = True # Not finished
+UERE = {'gps':1.9, 'galileo':1.8, 'glonass':2.8, 'beidou':1.7}
 
 # Select time-stamps for calculating GDOP
 UTC_DIFFERENCE = timedelta(hours=2) # Since Norway is UTC+2. This should be improved to solve for winter/summer time.
@@ -160,16 +161,16 @@ def calc_dop(gnss_sats_rel_pos):
         for const_sats in gnss_sats_rel_pos.values():
             for pos in list(const_sats):
                 all_sats.append(pos)
-        mat: np.array = []
+        H: np.array = []
         # psd - distance from observer to sat
         # Calc vis sats is list of sat names
         for pos in all_sats:
             psd = pos[3]
             # Row is normalized vector, with absolute length equal 1.
             row = [-pos[0] / psd, -pos[1] / psd, -pos[2] / psd, 1]
-            mat.append(row)
-
-        m = np.matmul(np.transpose(mat), mat)
+            H.append(row)
+        H = np.array(H)
+        m = H.T @ H
         Q = np.linalg.inv(m)
         T = np.trace(Q)
         EDOP = np.sqrt(Q[0][0]) # East DOP
@@ -190,19 +191,29 @@ def calc_wdop(gnss_sats_rel_pos):
     for const_sats in gnss_sats_rel_pos.values():
         for pos in list(const_sats):
             all_sats.append(pos)
-    mat: np.array = []
+    H: np.array = []
     # psd - distance from observer to sat
     # Calc vis sats is list of sat names
     for pos in all_sats:
         psd = pos[3]
         # Row is normalized vector, with absolute length equal 1.
         row = [-pos[0] / psd, -pos[1] / psd, -pos[2] / psd, 1]
-        mat.append(row)
+        H.append(row)
+    H = np.array(H)
+    # Create weights matrix W
+    gnss_count = gnss_sats_rel_pos.keys()
+    sat_UERE_vec = []
+    W_side_length = 0
+    for gnss in gnss_sats_rel_pos.keys():
+        sat_count = len(gnss_sats_rel_pos[gnss])
+        W_side_length += sat_count
+        for sat in range(sat_count):
+            sat_UERE_vec.append(1/ UERE[gnss]**2)
+    W = np.zeros((W_side_length,W_side_length))
+    for i in range(len(sat_UERE_vec)):
+        W[i,i] = sat_UERE_vec[i]
 
-    UERE_BDS = 1.7
-    W = 1
-
-    m = mat.T @ W @ mat
+    m = H.T @ W @ H
     Q = np.linalg.inv(m)
     T = np.trace(Q)
     EDOP = np.sqrt(Q[0][0]) # East DOP
