@@ -38,6 +38,7 @@ USE_GLONASS = False
 USE_BEIDOU  = False
 
 PLOT_SAT = True
+USE_WDOP = False # Not finished
 
 # Select time-stamps for calculating GDOP
 UTC_DIFFERENCE = timedelta(hours=2) # Since Norway is UTC+2. This should be improved to solve for winter/summer time.
@@ -151,18 +152,18 @@ def polar2cart(r, theta, phi):
 
 
 def calc_dop(gnss_sats_rel_pos):
-        if len(gnss_sats_rel_pos) > 1:
-            EDOP, NDOP, HDOP, VDOP, TDOP, GDOP = calc_wdop(gnss_sats_rel_pos)
-            return EDOP, NDOP, HDOP, VDOP, TDOP, GDOP
         satelite_count_in_first_gnss = len(list(gnss_sats_rel_pos.values())[0])
         if satelite_count_in_first_gnss < 4:
             return None, None, None, None, None, None
 
+        all_sats = []
+        for const_sats in gnss_sats_rel_pos.values():
+            for pos in list(const_sats):
+                all_sats.append(pos)
         mat: np.array = []
-        # d(0) - satellite x-pos
         # psd - distance from observer to sat
         # Calc vis sats is list of sat names
-        for pos in list(gnss_sats_rel_pos.values())[0]:
+        for pos in all_sats:
             psd = pos[3]
             # Row is normalized vector, with absolute length equal 1.
             row = [-pos[0] / psd, -pos[1] / psd, -pos[2] / psd, 1]
@@ -181,12 +182,36 @@ def calc_dop(gnss_sats_rel_pos):
 
 
 def calc_wdop(gnss_sats_rel_pos):
-    """
-    H_N = np
-    for gnss in gnss_sats_rel_pos[gnss]:
-        H_N = 
-    """
-    return None
+    satelite_count_in_first_gnss = len(list(gnss_sats_rel_pos.values())[0])
+    if satelite_count_in_first_gnss < 4:
+        return None, None, None, None, None, None
+
+    all_sats = []
+    for const_sats in gnss_sats_rel_pos.values():
+        for pos in list(const_sats):
+            all_sats.append(pos)
+    mat: np.array = []
+    # psd - distance from observer to sat
+    # Calc vis sats is list of sat names
+    for pos in all_sats:
+        psd = pos[3]
+        # Row is normalized vector, with absolute length equal 1.
+        row = [-pos[0] / psd, -pos[1] / psd, -pos[2] / psd, 1]
+        mat.append(row)
+
+    UERE_BDS = 1.7
+    W = 1
+
+    m = mat.T @ W @ mat
+    Q = np.linalg.inv(m)
+    T = np.trace(Q)
+    EDOP = np.sqrt(Q[0][0]) # East DOP
+    NDOP = np.sqrt(Q[1][1]) # North DOP
+    HDOP = np.sqrt(EDOP**2 + NDOP**2) # Horizontal DOP
+    VDOP = Q[2][2]                    # Vertical DOP
+    TDOP = Q[3][3]                    # Time DOP
+    GDOP = np.sqrt(HDOP**2 + VDOP**2 + TDOP**2) # Geometric DOP
+    return EDOP, NDOP, HDOP, VDOP, TDOP, GDOP
 
 
 def load_skylines(obs_point_count):
@@ -271,7 +296,10 @@ def calc_DOP_trough_time(observer, skyline, gnss_ephem, times):
                     #print(sat, r, theta, zenith1, zenith2, angle_lower, angle_upper)
                 if PLOT_SAT: plot_sat(sat_is_visible, ax, gnss, theta, r, idx, sat)
         idx += 1
-        EDOP, NDOP, HDOP, VDOP, TDOP, GDOP = calc_dop(gnss_sats_rel_pos)
+        if USE_WDOP:
+            EDOP, NDOP, HDOP, VDOP, TDOP, GDOP = calc_wdop(gnss_sats_rel_pos)
+        else:
+            EDOP, NDOP, HDOP, VDOP, TDOP, GDOP = calc_dop(gnss_sats_rel_pos)
         append_at_last_idx = len(GDOP_dfs[time].index)
         GDOP_dfs[time].loc[append_at_last_idx] = [EDOP, NDOP, HDOP, VDOP, TDOP, GDOP] 
         print(t, GDOP)
@@ -310,6 +338,6 @@ if __name__ == '__main__':
     
     for time in times:
         time_str = time.strftime('%Y.%m.%d-%H.%M')
-        filename = 'DOP_'+time_str+'.csv'
+        filename = 'WDOP_'+time_str+'.csv' if USE_WDOP else 'DOP_'+time_str+'.csv'
         location = Path(DOP_RESULTS_FOLDER / filename)
         GDOP_dfs[time].to_csv(location)
